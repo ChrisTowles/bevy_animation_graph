@@ -88,10 +88,19 @@ impl NodeLike for RotationNode {
             ctx.set_time_update_back(Self::IN_TIME, input);
         }
 
-        let target = ctx.data_back(Self::TARGET)?.into_entity_path()?;
-        let mut target = target.id();
-        let rotation = ctx.data_back(Self::ROTATION)?.as_quat()?;
         let mut pose = ctx.data_back(Self::IN_POSE)?.into_pose()?;
+        // No target or no rotation (an input the game sets at runtime, absent in an editor
+        // preview): the pose passes through untouched rather than failing the whole graph.
+        let (Ok(target), Ok(rotation)) = (
+            ctx.data_back(Self::TARGET)
+                .and_then(|t| t.into_entity_path()),
+            ctx.data_back(Self::ROTATION).and_then(|r| r.as_quat()),
+        ) else {
+            ctx.set_time(pose.timestamp);
+            ctx.set_data_fwd(Self::OUT_POSE, pose);
+            return Ok(());
+        };
+        let mut target = target.id();
         let Some(skeleton) = ctx
             .graph_context
             .resources
