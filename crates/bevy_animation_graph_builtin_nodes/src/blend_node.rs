@@ -4,7 +4,7 @@ use bevy_animation_graph_core::{
     animation_graph::TimeUpdate,
     animation_node::{NodeLike, ReflectNodeLike},
     context::{new_context::NodeContext, spec_context::SpecContext},
-    edge_data::{DataSpec, DataValue, bone_mask::BoneMask},
+    edge_data::{DataSpec, DataValue, bone_mask::BoneMask, events::EventQueue},
     errors::GraphError,
     interpolation::{
         additive::AdditiveInterpolator, difference::DifferenceInterpolator,
@@ -66,6 +66,7 @@ impl BlendNode {
     pub const IN_EVENT_B: &'static str = "events_b";
     pub const IN_BONE_MASK: &'static str = "bone_mask";
     pub const OUT_POSE: &'static str = "pose";
+    pub const OUT_EVENTS: &'static str = "events";
 }
 
 impl NodeLike for BlendNode {
@@ -196,6 +197,38 @@ impl NodeLike for BlendNode {
         ctx.set_time(base.timestamp);
         ctx.set_data_fwd(Self::OUT_POSE, base);
 
+        // Events from both sides, each scaled by the weight its pose got, so a consumer can keep
+        // the dominant clip's notifies and drop the faded one's.
+        let factor = ctx
+            .data_back(Self::FACTOR)
+            .ok()
+            .and_then(|f| f.as_f32().ok())
+            .unwrap_or(1.0);
+        let (weight_a, weight_b) = match self.mode {
+            BlendMode::LinearInterpolate => (1.0 - factor, factor),
+            BlendMode::Additive => (1.0, factor),
+            BlendMode::Difference => (1.0, 1.0),
+        };
+        let weighted = |queue: Option<EventQueue>, weight: f32| {
+            let mut queue = queue.unwrap_or_default();
+            for event in &mut queue.events {
+                event.weight *= weight;
+            }
+            queue
+        };
+        let events_a = ctx
+            .data_back(Self::IN_EVENT_A)
+            .ok()
+            .and_then(|v| v.into_event_queue().ok());
+        let events_b = ctx
+            .data_back(Self::IN_EVENT_B)
+            .ok()
+            .and_then(|v| v.into_event_queue().ok());
+        ctx.set_data_fwd(
+            Self::OUT_EVENTS,
+            weighted(events_a, weight_a).concat(weighted(events_b, weight_b)),
+        );
+
         Ok(())
     }
 
@@ -208,19 +241,16 @@ impl NodeLike for BlendNode {
         }
 
         ctx.add_input_data(Self::IN_POSE_A, DataSpec::Pose);
-        if matches!(&self.sync_mode, BlendSyncMode::EventTrack(_)) {
-            ctx.add_input_data(Self::IN_EVENT_A, DataSpec::EventQueue);
-        }
+        ctx.add_input_data(Self::IN_EVENT_A, DataSpec::EventQueue);
         ctx.add_input_time(Self::IN_TIME_A);
 
         ctx.add_input_data(Self::IN_POSE_B, DataSpec::Pose);
-        if matches!(&self.sync_mode, BlendSyncMode::EventTrack(_)) {
-            ctx.add_input_data(Self::IN_EVENT_B, DataSpec::EventQueue);
-        }
+        ctx.add_input_data(Self::IN_EVENT_B, DataSpec::EventQueue);
         ctx.add_input_time(Self::IN_TIME_B);
 
         // Output
         ctx.add_output_data(Self::OUT_POSE, DataSpec::Pose)
+            .add_output_data(Self::OUT_EVENTS, DataSpec::EventQueue)
             .add_output_time();
 
         Ok(())
