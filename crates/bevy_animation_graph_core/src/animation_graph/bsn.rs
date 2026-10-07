@@ -1,14 +1,16 @@
 //! `.animgraph.bsn`: an animation graph written as entities.
 //!
-//! The root entity carries [`AnimGraph`] (the graph's own pins) and [`Links`] (what feeds its
-//! outputs). Each child is a node: its `#Name` names it, its node component (any type that
-//! reflects `NodeLike`) is what it does, its [`Links`] say what feeds its inputs and
-//! [`NodePosition`] is where the editor draws it.
+//! The file is a scene: the loader spawns it into a world of its own and builds the graph from
+//! those entities ([`graph_from_world`]), which is also how an editor builds it from the live
+//! entities it edits. The root entity carries [`AnimGraph`] (the graph's own pins) and [`Links`]
+//! (what feeds its outputs). Each child is a node: its `#Name` names it, its node component (any
+//! type that reflects `NodeLike`) is what it does, its [`Links`] say what feeds its inputs (a
+//! node's output by entity reference) and [`NodePosition`] is where the editor draws it.
 //!
 //! ```bsn
 //! #jump
 //! AnimGraph { outputs: [Time, Data("pose", Pose)] }
-//! Links([Link(Data("pose"), Node("clip", "pose")), Link(Time(""), NodeTime("clip"))])
+//! Links([Link(Data("pose"), Node(#clip, "pose")), Link(Time(""), NodeTime(#clip))])
 //! Children [
 //!     #clip
 //!     ClipNode { clip: "anim/ual/Jump_Start.anim.ron" }
@@ -17,21 +19,24 @@
 //! ```
 
 use bevy::{
-    asset::{AssetLoader, AssetServer, LoadContext, io::Reader},
-    bsn_document::{
-        BsnApplyAssets, BsnPatch, BsnValue, SceneBsnAst, bsn_value_to_reflect, parse_bsn,
-    },
+    asset::{AssetLoader, AssetPath, AssetServer, Assets, LoadContext, UntypedHandle, io::Reader},
+    bsn::BsnDocument,
+    bsn_asset::DynamicScene,
     ecs::{
         component::Component,
         entity::Entity,
-        reflect::{AppTypeRegistry, ReflectComponent},
+        hierarchy::Children,
+        name::Name,
+        reflect::{AppTypeRegistry, ReflectComponent, ReflectFromTemplate},
+        template::FromTemplate,
         world::{FromWorld, World},
     },
     math::Vec2,
     reflect::{
-        PartialReflect, Reflect, ReflectFromReflect, TypePath, TypeRegistration, TypeRegistry,
-        TypeRegistryArc, std_traits::ReflectDefault,
+        Reflect, ReflectFromReflect, TypePath, TypeRegistry, TypeRegistryArc,
+        std_traits::ReflectDefault,
     },
+    scene::{ScenePatch, WorldSceneExt},
 };
 use uuid::Uuid;
 
@@ -86,13 +91,14 @@ impl Default for GraphOutput {
 }
 
 /// What feeds this entity's inputs: a node's input pins, or on the root, the graph's outputs.
-#[derive(Component, Reflect, Default, Clone, Debug)]
-#[reflect(Component, Default, Clone)]
-pub struct Links(pub Vec<Link>);
+#[derive(Component, FromTemplate, Reflect, Clone, Debug, PartialEq)]
+#[template(reflect)]
+#[reflect(Component, Clone, FromTemplate)]
+pub struct Links(#[template(built_in)] pub Vec<Link>);
 
 /// One input and the output it reads.
-#[derive(Reflect, Clone, Debug, Default, PartialEq)]
-#[reflect(Default)]
+#[derive(FromTemplate, Reflect, Clone, Debug, PartialEq)]
+#[template(reflect)]
 pub struct Link(pub LinkTo, pub LinkFrom);
 
 /// The input end of a [`Link`]. On the root, `Time`'s pin name is ignored: a graph has one
@@ -110,20 +116,16 @@ impl Default for LinkTo {
     }
 }
 
-/// The output end of a [`Link`]: a node's output by node name, or one of the graph's inputs.
-#[derive(Reflect, Clone, Debug, PartialEq)]
-#[reflect(Default)]
+/// The output end of a [`Link`]: a node's output (the node entity, `#name` in a file), or one of
+/// the graph's inputs.
+#[derive(FromTemplate, Reflect, Clone, Debug, PartialEq)]
+#[template(reflect)]
 pub enum LinkFrom {
-    Node(String, PinId),
-    NodeTime(String),
+    Node(Entity, PinId),
+    NodeTime(Entity),
+    #[default]
     Input(GraphInputPin),
     InputTime(GraphInputPin),
-}
-
-impl Default for LinkFrom {
-    fn default() -> Self {
-        Self::NodeTime(String::default())
-    }
 }
 
 /// Where the editor draws a node.
@@ -143,26 +145,17 @@ pub fn node_id(name: &str) -> NodeId {
     ))
 }
 
-/// Builds the graph a parsed `.animgraph.bsn` describes, from its root entity.
-///
-/// Handle fields resolve through `assets`; without it they stay default handles.
-pub fn graph_from_document(
-    ast: &SceneBsnAst,
+/// Builds the graph the entities under `root` describe (a spawned `.animgraph.bsn`, or the
+/// entities an editor holds).
+pub fn graph_from_world(
+    world: &World,
     root: Entity,
     registry: &TypeRegistry,
-    assets: Option<&BsnApplyAssets>,
 ) -> Result<AnimationGraph, String> {
     let mut graph = AnimationGraph::new();
-    let mut spec = None;
-    let mut root_links = Vec::new();
-    for value in entity_values(ast, root, registry, assets)? {
-        if let Some(g) = value.downcast_ref::<AnimGraph>() {
-            spec = Some(g.clone());
-        } else if let Some(l) = value.downcast_ref::<Links>() {
-            root_links = l.0.clone();
-        }
-    }
-    let spec = spec.ok_or("the root carries no AnimGraph")?;
+    let spec = world
+        .get::<AnimGraph>(root)
+        .ok_or("the root carries no AnimGraph")?;
     for input in &spec.inputs {
         match input {
             GraphInput::Time(pin) => graph.io_spec.add_input_time(pin.clone()),
@@ -184,45 +177,35 @@ pub fn graph_from_document(
     graph.editor_metadata.output_position = spec.output_position;
 
     let mut edges = Vec::new();
-    for link in root_links {
+    for link in links(world, root) {
         let target = match &link.0 {
             LinkTo::Data(pin) => TargetPin::OutputData(pin.clone()),
             LinkTo::Time(_) => TargetPin::OutputTime,
         };
-        edges.push((source_pin(&link.1), target));
+        edges.push((source_pin(world, &link.1)?, target));
     }
-    for child in ast.get_children_ast(root) {
-        let name = ast
-            .get_name(child)
+    for child in world.get::<Children>(root).map(|c| c.to_vec()).unwrap_or_default() {
+        let name = world
+            .get::<Name>(child)
             .ok_or("a node has no #Name")?
+            .as_str()
             .to_string();
         let id = node_id(&name);
-        let mut inner = None;
-        for value in entity_values(ast, child, registry, assets)? {
-            if let Some(l) = value.downcast_ref::<Links>() {
-                for link in &l.0 {
-                    let target = match &link.0 {
-                        LinkTo::Data(pin) => TargetPin::NodeData(id, pin.clone()),
-                        LinkTo::Time(pin) => TargetPin::NodeTime(id, pin.clone()),
-                    };
-                    edges.push((source_pin(&link.1), target));
-                }
-            } else if let Some(p) = value.downcast_ref::<NodePosition>() {
-                graph
-                    .editor_metadata
-                    .node_positions
-                    .insert(id, Vec2::new(p.0, p.1));
-            } else if let Some(node_like) = registry
-                .get((*value).type_id())
-                .and_then(|r| r.data::<ReflectNodeLike>())
-            {
-                let boxed = node_like
-                    .get_boxed(value)
-                    .map_err(|_| format!("{name}: not a NodeLike"))?;
-                inner = Some(DynNodeLike(boxed));
-            }
+        for link in links(world, child) {
+            let target = match &link.0 {
+                LinkTo::Data(pin) => TargetPin::NodeData(id, pin.clone()),
+                LinkTo::Time(pin) => TargetPin::NodeTime(id, pin.clone()),
+            };
+            edges.push((source_pin(world, &link.1)?, target));
         }
-        let inner = inner.ok_or_else(|| format!("{name}: no node component"))?;
+        if let Some(p) = world.get::<NodePosition>(child) {
+            graph
+                .editor_metadata
+                .node_positions
+                .insert(id, Vec2::new(p.0, p.1));
+        }
+        let inner = node_component(world, child, registry)
+            .ok_or_else(|| format!("{name}: no node component"))?;
         graph.add_node(AnimationNode {
             id,
             name,
@@ -246,76 +229,66 @@ pub fn graph_from_document(
     Ok(graph)
 }
 
-fn source_pin(from: &LinkFrom) -> SourcePin {
-    match from {
-        LinkFrom::Node(node, pin) => SourcePin::NodeData(node_id(node), pin.clone()),
-        LinkFrom::NodeTime(node) => SourcePin::NodeTime(node_id(node)),
+fn links(world: &World, entity: Entity) -> Vec<Link> {
+    world.get::<Links>(entity).map(|l| l.0.clone()).unwrap_or_default()
+}
+
+/// The entity's node component (the one reflecting `NodeLike`), cloned.
+fn node_component(world: &World, entity: Entity, registry: &TypeRegistry) -> Option<DynNodeLike> {
+    let entity_ref = world.get_entity(entity).ok()?;
+    entity_ref.archetype().components().iter().find_map(|&id| {
+        let type_id = world.components().get_info(id)?.type_id()?;
+        let registration = registry.get(type_id)?;
+        let node_like = registration.data::<ReflectNodeLike>()?;
+        let value = registration.data::<ReflectComponent>()?.reflect(entity_ref)?;
+        let owned = value.reflect_clone().ok().or_else(|| {
+            registration
+                .data::<ReflectFromReflect>()?
+                .from_reflect(value.as_partial_reflect())
+        })?;
+        node_like.get_boxed(owned).ok().map(DynNodeLike)
+    })
+}
+
+/// The id of the node an entity is: its name's.
+fn node_of(world: &World, entity: Entity) -> Result<NodeId, String> {
+    world
+        .get::<Name>(entity)
+        .map(|name| node_id(name.as_str()))
+        .ok_or_else(|| "a link reads from an entity that is not a named node".to_string())
+}
+
+fn source_pin(world: &World, from: &LinkFrom) -> Result<SourcePin, String> {
+    Ok(match from {
+        LinkFrom::Node(entity, pin) => SourcePin::NodeData(node_of(world, *entity)?, pin.clone()),
+        LinkFrom::NodeTime(entity) => SourcePin::NodeTime(node_of(world, *entity)?),
         LinkFrom::Input(pin) => SourcePin::InputData(pin.clone()),
         LinkFrom::InputTime(pin) => SourcePin::InputTime(pin.clone()),
-    }
+    })
 }
 
-/// Every component patch on one document entity, reflected into its concrete type. Types the
-/// registry does not know are skipped.
-pub(crate) fn entity_values(
-    ast: &SceneBsnAst,
-    entity: Entity,
-    registry: &TypeRegistry,
-    assets: Option<&BsnApplyAssets>,
-) -> Result<Vec<Box<dyn Reflect>>, String> {
-    let Some(patches) = ast.get_patches(entity) else {
-        return Ok(Vec::new());
-    };
-    let mut values = Vec::new();
-    for &patch in &patches.0 {
-        let (type_path, value) = match ast.get_patch(patch) {
-            Some(BsnPatch::Struct(data)) => (&data.type_path, BsnValue::Struct(data.clone())),
-            Some(BsnPatch::TupleStruct(data)) => {
-                (&data.type_path, BsnValue::TupleStruct(data.clone()))
-            }
-            Some(BsnPatch::Type(type_path)) => (type_path, BsnValue::Type(type_path.clone())),
-            _ => continue,
-        };
-        let Some(registration) = registration_of(registry, type_path) else {
-            if registry.is_ambiguous(type_path) {
-                return Err(format!(
-                    "`{type_path}` names more than one type; write its full path"
-                ));
-            }
-            continue;
-        };
-        let reflected = bsn_value_to_reflect(&value, registration.type_id(), registry, assets)
-            .ok_or_else(|| format!("{type_path}: value does not fit the type"))?;
-        values.push(concrete(registration, reflected.as_ref())?);
-    }
-    Ok(values)
-}
-
-fn registration_of<'a>(registry: &'a TypeRegistry, path: &str) -> Option<&'a TypeRegistration> {
-    registry
-        .get_with_type_path(path)
-        .or_else(|| registry.get_with_short_type_path(path))
-}
-
-fn concrete(
-    registration: &TypeRegistration,
-    value: &dyn PartialReflect,
-) -> Result<Box<dyn Reflect>, String> {
-    let path = registration.type_info().type_path();
-    if let Some(from_reflect) = registration.data::<ReflectFromReflect>() {
-        if let Some(concrete) = from_reflect.from_reflect(value) {
-            return Ok(concrete);
-        }
-    }
-    // A partial value: fill it over the type's default.
-    let default = registration
-        .data::<ReflectDefault>()
-        .ok_or_else(|| format!("{path}: neither FromReflect nor Default"))?;
-    let mut concrete = default.default();
-    concrete
-        .try_apply(value)
-        .map_err(|e| format!("{path}: {e}"))?;
-    Ok(concrete)
+/// Parses `text` and spawns it, as a scene, into a world of its own; handles load through
+/// `handles` (the load context, in a loader).
+pub fn spawn_document(
+    text: &str,
+    path: &str,
+    registry: &TypeRegistryArc,
+    server: &AssetServer,
+    handles: &mut dyn FnMut(core::any::TypeId, AssetPath<'static>) -> UntypedHandle,
+) -> Result<(World, Entity), String> {
+    let document = BsnDocument::parse(text).map_err(|e| format!("{e:?}"))?;
+    let registry = AppTypeRegistry(registry.clone());
+    let scene = DynamicScene::from_document_with_handles(&document, path, &registry, handles)
+        .map_err(|e| e.render(text))?;
+    let mut world = World::new();
+    world.insert_resource(registry);
+    world.insert_resource(server.clone());
+    world.init_resource::<Assets<ScenePatch>>();
+    let root = world
+        .spawn_scene(scene)
+        .map_err(|e| format!("{e:?}"))?
+        .id();
+    Ok((world, root))
 }
 
 /// Loads `.animgraph.bsn` files as [`AnimationGraph`]s.
@@ -350,18 +323,11 @@ impl AssetLoader for AnimGraphBsnLoader {
         let path = load_context.path().to_string();
         let text = std::str::from_utf8(&bytes)
             .map_err(|e| AssetLoaderError::Bsn(format!("{path}: {e}")))?;
-        let ast = parse_bsn(text).map_err(|e| AssetLoaderError::Bsn(format!("{path}: {e:?}")))?;
-        let [root] = ast.roots[..] else {
-            return Err(AssetLoaderError::Bsn(format!(
-                "{path}: a graph document has one root entity, not {}",
-                ast.roots.len()
-            )));
-        };
-        let assets = BsnApplyAssets {
-            server: &self.server,
-            local: None,
-        };
-        graph_from_document(&ast, root, &self.registry.read(), Some(&assets))
+        let mut handles =
+            |type_id, asset_path| load_context.load_builder().load_erased(type_id, asset_path);
+        let (world, root) = spawn_document(text, &path, &self.registry, &self.server, &mut handles)
+            .map_err(|e| AssetLoaderError::Bsn(format!("{path}: {e}")))?;
+        graph_from_world(&world, root, &self.registry.read())
             .map_err(|e| AssetLoaderError::Bsn(format!("{path}: {e}")))
     }
 

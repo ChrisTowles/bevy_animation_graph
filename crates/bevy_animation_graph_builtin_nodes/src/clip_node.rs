@@ -56,6 +56,13 @@ impl ClipNode {
         }
     }
 
+    /// Extract root motion from the clip this way.
+    #[must_use]
+    pub fn with_root_motion(mut self, mode: RootMotionMode) -> Self {
+        self.root_motion_mode = mode;
+        self
+    }
+
     #[inline]
     pub fn clip_duration(&self, ctx: &NodeContext) -> Result<f32, GraphError> {
         if let Some(duration) = self.override_duration {

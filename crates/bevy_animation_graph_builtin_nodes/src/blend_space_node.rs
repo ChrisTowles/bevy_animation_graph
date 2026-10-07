@@ -76,6 +76,18 @@ impl BlendSpaceNode {
         &self.points[id].id
     }
 
+    /// The stored triangulation, or one built from `points` when none was stored (a node
+    /// authored in a document carries only its points).
+    fn triangulation(&self) -> std::borrow::Cow<'_, Triangulation> {
+        if self.triangulation.is_empty() && self.points.len() >= 3 {
+            std::borrow::Cow::Owned(Triangulation::from_points_delaunay(
+                self.points.iter().map(|x| x.point).collect(),
+            ))
+        } else {
+            std::borrow::Cow::Borrowed(&self.triangulation)
+        }
+    }
+
     pub fn refresh_triangulation(&mut self) {
         self.triangulation = Triangulation::from_points_delaunay(
             self.points.clone().into_iter().map(|x| x.point).collect(),
@@ -87,7 +99,7 @@ impl NodeLike for BlendSpaceNode {
     fn duration(&self, mut ctx: NodeContext) -> Result<(), GraphError> {
         let position = ctx.data_back(Self::POSITION)?.as_vec2()?;
         let (v0, _) = self
-            .triangulation
+            .triangulation()
             .find_linear_combination(position)
             .into_iter()
             .max_by(|l, r| l.1.partial_cmp(&r.1).unwrap())
@@ -105,7 +117,7 @@ impl NodeLike for BlendSpaceNode {
         let input = ctx.time_update_fwd()?;
 
         let position = ctx.data_back(Self::POSITION)?.as_vec2()?;
-        let mut linear_combination = self.triangulation.find_linear_combination(position);
+        let mut linear_combination = self.triangulation().find_linear_combination(position);
         // sorted by highest weight first, lowest weight last
         linear_combination.sort_by(|l, r| l.1.partial_cmp(&r.1).unwrap().reverse());
 
@@ -250,5 +262,30 @@ impl EditProxy for BlendSpaceNode {
             sync_mode: self.sync_mode.clone(),
             points: self.points.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_node_with_only_points_triangulates_them() {
+        let node = BlendSpaceNode {
+            points: [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+                .into_iter()
+                .enumerate()
+                .map(|(i, (x, y))| PointElement {
+                    id: i.to_string(),
+                    point: Vec2::new(x, y),
+                })
+                .collect(),
+            ..default()
+        };
+        let weights = node
+            .triangulation()
+            .find_linear_combination(Vec2::new(0.25, 0.25));
+        assert_eq!(weights.len(), 3);
+        assert!((weights.iter().map(|w| w.1).sum::<f32>() - 1.0).abs() < 1e-4);
     }
 }

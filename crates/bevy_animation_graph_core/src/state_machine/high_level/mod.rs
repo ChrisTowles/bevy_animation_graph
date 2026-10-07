@@ -2,6 +2,7 @@ pub mod bsn;
 
 use bevy::{
     asset::{Asset, Handle, ReflectAsset},
+    ecs::template::FromTemplate,
     math::Vec2,
     platform::collections::HashMap,
     reflect::{Reflect, std_traits::ReflectDefault},
@@ -70,7 +71,8 @@ pub struct DirectTransition {
     pub data: TransitionData,
 }
 
-#[derive(Reflect, Debug, Clone, Default)]
+#[derive(Reflect, Debug, Clone, Default, FromTemplate)]
+#[template(reflect)]
 #[reflect(Default)]
 pub struct TransitionData {
     pub kind: TransitionKind,
@@ -82,7 +84,8 @@ pub struct TransitionData {
     pub reset_target_state: bool,
 }
 
-#[derive(Reflect, Debug, Clone, Default)]
+#[derive(Reflect, Debug, Clone, Default, FromTemplate)]
+#[template(reflect)]
 #[reflect(Default)]
 pub enum TransitionKind {
     #[default]

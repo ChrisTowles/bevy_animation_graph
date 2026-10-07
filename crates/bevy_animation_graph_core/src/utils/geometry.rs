@@ -45,7 +45,6 @@ impl Edge {
         Self { p, q }
     }
 
-    #[allow(dead_code)]
     pub fn compare_value(&self, other: &Self) -> bool {
         (self.p.val == other.p.val && self.q.val == other.q.val)
             || (self.p.val == other.q.val && self.q.val == other.p.val)
@@ -260,8 +259,8 @@ impl Line {
         if determinant == 0. {
             None
         } else {
-            let x = other.b * self.c - self.b * other.c;
-            let y = self.a * other.c - other.a * self.c;
+            let x = (other.b * self.c - self.b * other.c) / determinant;
+            let y = (self.a * other.c - other.a * self.c) / determinant;
 
             Some(Vec2::new(x, y))
         }

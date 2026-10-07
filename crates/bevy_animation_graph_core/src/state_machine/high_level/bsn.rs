@@ -1,12 +1,13 @@
 //! `.fsm.bsn`: a state machine written as entities.
 //!
-//! The root carries [`AnimFsm`] (start state and pins). Each child carrying [`AnimState`] is a state,
-//! its `#Name` the state's label; each carrying [`AnimTransition`] is a direct transition between
-//! two states, by label.
+//! A scene, like `.animgraph.bsn`: the loader spawns it and builds the machine from the entities
+//! ([`fsm_from_world`]). The root carries [`AnimFsm`] (start state and pins). Each child carrying
+//! [`AnimState`] is a state, its `#Name` the state's label; each carrying [`AnimTransition`] is a
+//! direct transition between two states. States are referenced by entity (`#name` in a file).
 //!
 //! ```bsn
 //! #locomotion
-//! AnimFsm { start: "grounded", inputs: [Data("speed", F32)], outputs: [Time, Data("pose", Pose)] }
+//! AnimFsm { start: #grounded, inputs: [Data("speed", F32)], outputs: [Time, Data("pose", Pose)] }
 //! Children [
 //!     #grounded
 //!     AnimState { graph: "anim/ual/grounded.animgraph.bsn" }
@@ -16,22 +17,24 @@
 
 use bevy::{
     asset::{AssetLoader, AssetServer, Handle, LoadContext, io::Reader},
-    bsn_document::{BsnApplyAssets, SceneBsnAst, parse_bsn},
     ecs::{
         component::Component,
         entity::Entity,
-        reflect::{AppTypeRegistry, ReflectComponent},
+        hierarchy::Children,
+        name::Name,
+        reflect::{AppTypeRegistry, ReflectComponent, ReflectFromTemplate},
+        template::FromTemplate,
         world::{FromWorld, World},
     },
     math::Vec2,
-    reflect::{Reflect, TypePath, TypeRegistry, TypeRegistryArc, std_traits::ReflectDefault},
+    reflect::{Reflect, TypePath, TypeRegistryArc, std_traits::ReflectDefault},
 };
 use uuid::Uuid;
 
 use crate::{
     animation_graph::{
         AnimationGraph, PinId,
-        bsn::{GraphOutput, NodePosition, entity_values},
+        bsn::{GraphOutput, NodePosition, spawn_document},
     },
     context::spec_context::NodeSpec,
     edge_data::DataSpec,
@@ -41,11 +44,12 @@ use crate::{
     },
 };
 
-/// The state machine's start state (by label) and pins.
-#[derive(Component, Reflect, Default, Clone, Debug)]
-#[reflect(Component, Default, Clone)]
+/// The state machine's start state and pins.
+#[derive(Component, FromTemplate, Reflect, Clone, Debug)]
+#[template(reflect)]
+#[reflect(Component, Clone, FromTemplate)]
 pub struct AnimFsm {
-    pub start: String,
+    pub start: Entity,
     pub inputs: Vec<FsmInput>,
     pub outputs: Vec<GraphOutput>,
 }
@@ -71,12 +75,13 @@ pub struct AnimState {
     pub enter: Option<TransitionData>,
 }
 
-/// A direct transition between two states, by label.
-#[derive(Component, Reflect, Default, Clone, Debug)]
-#[reflect(Component, Default, Clone)]
+/// A direct transition between two states.
+#[derive(Component, FromTemplate, Reflect, Clone, Debug)]
+#[template(reflect)]
+#[reflect(Component, Clone, FromTemplate)]
 pub struct AnimTransition {
-    pub from: String,
-    pub to: String,
+    pub from: Entity,
+    pub to: Entity,
     pub data: TransitionData,
 }
 
@@ -93,17 +98,10 @@ pub fn state_id(label: &str) -> StateId {
     StateId(id_of(label))
 }
 
-/// Builds the state machine a parsed `.fsm.bsn` describes, from its root entity.
-pub fn fsm_from_document(
-    ast: &SceneBsnAst,
-    root: Entity,
-    registry: &TypeRegistry,
-    assets: Option<&BsnApplyAssets>,
-) -> Result<StateMachine, String> {
-    let spec = entity_values(ast, root, registry, assets)?
-        .into_iter()
-        .find_map(|v| v.downcast_ref::<AnimFsm>().cloned())
-        .ok_or("the root carries no AnimFsm")?;
+/// Builds the state machine the entities under `root` describe (a spawned `.fsm.bsn`, or the
+/// entities an editor holds).
+pub fn fsm_from_world(world: &World, root: Entity) -> Result<StateMachine, String> {
+    let spec = world.get::<AnimFsm>(root).ok_or("the root carries no AnimFsm")?;
     let mut node_spec = NodeSpec::default();
     for input in &spec.inputs {
         match input {
@@ -121,33 +119,34 @@ pub fn fsm_from_document(
         node_spec,
         ..Default::default()
     };
+    let label = |entity: Entity| world.get::<Name>(entity).map(|n| n.as_str().to_string());
     let mut labels = Vec::new();
-    for child in ast.get_children_ast(root) {
-        let name = ast.get_name(child).unwrap_or_default().to_string();
-        let mut position = None;
-        for value in entity_values(ast, child, registry, assets)? {
-            if let Some(state) = value.downcast_ref::<AnimState>() {
-                fsm.add_state(State {
-                    id: state_id(&name),
-                    label: name.clone(),
-                    graph: state.graph.clone(),
-                    state_transition: state.enter.clone(),
-                });
-                labels.push(name.clone());
-            } else if let Some(t) = value.downcast_ref::<AnimTransition>() {
-                fsm.add_transition_unchecked(DirectTransition {
-                    id: DirectTransitionId(id_of(&format!("{}->{}", t.from, t.to))),
-                    source: state_id(&t.from),
-                    target: state_id(&t.to),
-                    data: t.data.clone(),
-                });
-            } else if let Some(p) = value.downcast_ref::<NodePosition>() {
-                position = Some(Vec2::new(p.0, p.1));
-            }
+    for child in world.get::<Children>(root).map(|c| c.to_vec()).unwrap_or_default() {
+        let name = label(child).unwrap_or_default();
+        if let Some(state) = world.get::<AnimState>(child) {
+            fsm.add_state(State {
+                id: state_id(&name),
+                label: name.clone(),
+                graph: state.graph.clone(),
+                state_transition: state.enter.clone(),
+            });
+            labels.push(name.clone());
         }
-        if let Some(position) = position {
+        if let Some(t) = world.get::<AnimTransition>(child) {
+            let (Some(from), Some(to)) = (label(t.from), label(t.to)) else {
+                bevy::log::warn!("dropping a transition between entities that are not states");
+                continue;
+            };
+            fsm.add_transition_unchecked(DirectTransition {
+                id: DirectTransitionId(id_of(&format!("{from}->{to}"))),
+                source: state_id(&from),
+                target: state_id(&to),
+                data: t.data.clone(),
+            });
+        }
+        if let Some(p) = world.get::<NodePosition>(child) {
             fsm.editor_metadata
-                .set_state_position(state_id(&name), position);
+                .set_state_position(state_id(&name), Vec2::new(p.0, p.1));
         }
     }
     // A transition to or from a state that is gone is dropped, not fatal.
@@ -159,10 +158,10 @@ pub fn fsm_from_document(
         }
         known
     });
-    if !labels.contains(&spec.start) {
-        return Err(format!("start state `{}` is not a state", spec.start));
-    }
-    fsm.set_start_state(state_id(&spec.start));
+    let start = label(spec.start)
+        .filter(|start| labels.contains(start))
+        .ok_or("the start state is not a state")?;
+    fsm.set_start_state(state_id(&start));
     fsm.update_low_level_fsm();
     Ok(fsm)
 }
@@ -199,19 +198,11 @@ impl AssetLoader for FsmBsnLoader {
         let path = load_context.path().to_string();
         let text = std::str::from_utf8(&bytes)
             .map_err(|e| AssetLoaderError::Bsn(format!("{path}: {e}")))?;
-        let ast = parse_bsn(text).map_err(|e| AssetLoaderError::Bsn(format!("{path}: {e:?}")))?;
-        let [root] = ast.roots[..] else {
-            return Err(AssetLoaderError::Bsn(format!(
-                "{path}: a state machine document has one root entity, not {}",
-                ast.roots.len()
-            )));
-        };
-        let assets = BsnApplyAssets {
-            server: &self.server,
-            local: None,
-        };
-        fsm_from_document(&ast, root, &self.registry.read(), Some(&assets))
-            .map_err(|e| AssetLoaderError::Bsn(format!("{path}: {e}")))
+        let mut handles =
+            |type_id, asset_path| load_context.load_builder().load_erased(type_id, asset_path);
+        let (world, root) = spawn_document(text, &path, &self.registry, &self.server, &mut handles)
+            .map_err(|e| AssetLoaderError::Bsn(format!("{path}: {e}")))?;
+        fsm_from_world(&world, root).map_err(|e| AssetLoaderError::Bsn(format!("{path}: {e}")))
     }
 
     fn extensions(&self) -> &[&str] {

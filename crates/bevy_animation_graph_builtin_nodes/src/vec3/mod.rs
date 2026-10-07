@@ -1,5 +1,6 @@
 pub mod const_vec3;
 pub mod from_f32;
+pub mod vec2_from_f32;
 pub mod into_f32;
 pub mod length;
 pub mod lerp;

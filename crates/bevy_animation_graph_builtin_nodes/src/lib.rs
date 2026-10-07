@@ -85,6 +85,7 @@ impl BuiltinNodesPlugin {
             .register_type::<CompareF32>()
             // quat
             .register_type::<RotationArcNode>()
+            .register_type::<vec3::vec2_from_f32::BuildVec2Node>()
             // event queue
             .register_type::<FireEventNode>()
             .register_type::<MapEventsNode>()

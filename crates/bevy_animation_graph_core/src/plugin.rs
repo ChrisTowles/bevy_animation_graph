@@ -25,7 +25,7 @@ use crate::{
     animation_clip::{EntityPath, GraphClip, Interpolation, loader::GraphClipLoader},
     animation_graph::{
         AnimationGraph,
-        bsn::{AnimGraph, AnimGraphBsnLoader, Links, NodePosition},
+        bsn::{AnimGraph, AnimGraphBsnLoader, Links, LinksTemplate, NodePosition},
     },
     animation_graph_player::AnimationGraphPlayer,
     animation_node::AnimationNode,
@@ -42,7 +42,9 @@ use crate::{
     skeleton::{Skeleton, loader::SkeletonLoader},
     state_machine::high_level::{
         StateMachine,
-        bsn::{AnimFsm, AnimState, AnimTransition, FsmBsnLoader},
+        bsn::{
+            AnimFsm, AnimFsmTemplate, AnimState, AnimTransition, AnimTransitionTemplate, FsmBsnLoader,
+        },
     },
     symmetry::{config::SymmetryConfig, serial::SymmetryConfigSerial},
     systems::{
@@ -161,6 +163,7 @@ impl AnimationGraphCorePlugin {
             .register_asset_reflect::<AnimationGraph>()
             .register_type::<AnimGraph>()
             .register_type::<Links>()
+            .register_type::<LinksTemplate>()
             .register_type::<NodePosition>();
         app.init_asset::<AnimatedScene>()
             .init_asset_loader::<AnimatedSceneLoader>()
@@ -168,8 +171,10 @@ impl AnimationGraphCorePlugin {
         app.init_asset::<StateMachine>()
             .init_asset_loader::<FsmBsnLoader>()
             .register_type::<AnimFsm>()
+            .register_type::<AnimFsmTemplate>()
             .register_type::<AnimState>()
             .register_type::<AnimTransition>()
+            .register_type::<AnimTransitionTemplate>()
             .register_asset_reflect::<StateMachine>();
         app.init_asset::<Skeleton>()
             .init_asset_loader::<SkeletonLoader>()

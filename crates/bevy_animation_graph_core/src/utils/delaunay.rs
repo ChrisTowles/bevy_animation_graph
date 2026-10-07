@@ -28,6 +28,10 @@ impl Triangulation {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.triangles.is_empty()
+    }
+
     pub fn find_linear_combination(&self, p: Vec2) -> Vec<(Vertex, f32)> {
         let (i, (closest_p, _)) = self
             .triangles
@@ -60,7 +64,13 @@ fn add_vertex(mut triangles: Vec<CachedTriangle>, vertex: Vertex) -> Vec<CachedT
         }
     });
 
-    edges.dedup();
+    // The hole's boundary: edges of exactly one removed triangle. An edge two removed
+    // triangles share is inside the hole and must go.
+    let edges: Vec<_> = edges
+        .iter()
+        .filter(|e| edges.iter().filter(|o| e.compare_value(o)).count() == 1)
+        .cloned()
+        .collect();
 
     edges.into_iter().for_each(|edge| {
         triangles.push(CachedTriangle::from_triangle(Triangle::new(
@@ -100,5 +110,30 @@ mod test {
             1.,
             linear_combination[0].1 + linear_combination[1].1 + linear_combination[2].1
         );
+    }
+}
+#[cfg(test)]
+mod walk_space {
+    use super::*;
+    use crate::utils::geometry::VertexId;
+
+    /// A walk/strafe/backpedal space: a few triangles, and a point past the back edge lands
+    /// wholly on the backpedal, not on a forward clip.
+    #[test]
+    fn a_point_outside_projects_onto_the_nearest_edge() {
+        let points = [
+            (0., 0.), (0., 1.0), (-0.75, 0.75), (0.75, 0.75), (-0.7, 0.), (0.6, 0.),
+            (0., -1.05), (-0.975, -0.975), (0.975, -0.975), (0., 5.4), (0., 8.25),
+        ];
+        let t = Triangulation::from_points_delaunay(
+            points.iter().map(|&(x, y)| Vec2::new(x, y)).collect(),
+        );
+        assert!(t.triangles.len() < 2 * points.len(), "{} triangles", t.triangles.len());
+        let back = t
+            .find_linear_combination(Vec2::new(0., -3.))
+            .into_iter()
+            .find(|(v, _)| v.id == VertexId::Index(6))
+            .map(|(_, w)| w);
+        assert!(back.is_some_and(|w| w > 0.99), "{back:?}");
     }
 }

@@ -1,13 +1,21 @@
-//! `.animgraph.bsn` and `.fsm.bsn` documents build the graphs and state machines they describe.
+//! `.animgraph.bsn` and `.fsm.bsn` files, spawned as scenes, build the graphs and state machines
+//! they describe.
 
-use bevy::{bsn_document::parse_bsn, prelude::*};
+use bevy::{asset::AssetPlugin, prelude::*};
 use bevy_animation_graph_builtin_nodes::BuiltinNodesPlugin;
 use bevy_animation_graph_core::{
+    animation_clip::GraphClip,
     animation_graph::{
-        SourcePin, TargetPin,
-        bsn::{AnimGraph, Links, NodePosition, graph_from_document, node_id},
+        AnimationGraph, SourcePin, TargetPin,
+        bsn::{AnimGraph, Links, LinksTemplate, NodePosition, graph_from_world, node_id, spawn_document},
     },
-    state_machine::high_level::bsn::{AnimFsm, AnimState, AnimTransition, fsm_from_document, state_id},
+    state_machine::high_level::{
+        StateMachine,
+        bsn::{
+            AnimFsm, AnimFsmTemplate, AnimState, AnimTransition, AnimTransitionTemplate,
+            fsm_from_world, state_id,
+        },
+    },
 };
 
 /// zero's one-shot `jump` state: the clip plays, and its finish event becomes a transition
@@ -16,9 +24,9 @@ const JUMP: &str = r#"
 #jump
 AnimGraph { outputs: [Time, Data("pose", Pose), Data("driver_events", EventQueue)] }
 Links([
-    Link(Data("pose"), Node("clip", "pose")),
-    Link(Time(""), NodeTime("clip")),
-    Link(Data("driver_events"), Node("on finish", "events")),
+    Link(Data("pose"), Node(#clip, "pose")),
+    Link(Time(""), NodeTime(#clip)),
+    Link(Data("driver_events"), Node(#"on finish", "events")),
 ])
 Children [
     #clip
@@ -27,28 +35,47 @@ Children [
     --
     #"on finish"
     MapEventsNode { map_from: AnimationClipFinished, map_to: TransitionToStateLabel("airborne") }
-    Links([Link(Data("events"), Node("clip", "events"))])
+    Links([Link(Data("events"), Node(#clip, "events"))])
     NodePosition(330.0, 140.0)
 ]
 "#;
 
-fn registry() -> AppTypeRegistry {
+fn app() -> App {
     let mut app = App::new();
-    app.add_plugins(BuiltinNodesPlugin)
+    app.add_plugins((TaskPoolPlugin::default(), AssetPlugin::default(), BuiltinNodesPlugin))
+        .init_asset::<GraphClip>()
+        .init_asset::<AnimationGraph>()
+        .init_asset::<StateMachine>()
         .register_type::<AnimGraph>()
         .register_type::<Links>()
+        .register_type::<LinksTemplate>()
         .register_type::<NodePosition>()
         .register_type::<AnimFsm>()
+        .register_type::<AnimFsmTemplate>()
         .register_type::<AnimState>()
-        .register_type::<AnimTransition>();
-    app.world().resource::<AppTypeRegistry>().clone()
+        .register_type::<AnimTransition>()
+        .register_type::<AnimTransitionTemplate>()
+        .register_type::<Children>()
+        .register_type::<ChildOf>()
+        .register_type::<Name>();
+    app
+}
+
+fn spawn(app: &App, text: &str) -> Result<(World, Entity), String> {
+    let registry = app.world().resource::<AppTypeRegistry>().0.clone();
+    let server = app.world().resource::<AssetServer>().clone();
+    let mut handles = |type_id, path| server.load_builder().load_erased(type_id, path);
+    spawn_document(text, "test.bsn", &registry, &server, &mut handles)
+}
+
+fn graph(app: &App, text: &str) -> Result<AnimationGraph, String> {
+    let (world, root) = spawn(app, text)?;
+    graph_from_world(&world, root, &app.world().resource::<AppTypeRegistry>().read())
 }
 
 #[test]
 fn a_bsn_graph_builds_its_nodes_edges_and_pins() {
-    let ast = parse_bsn(JUMP).expect("parses");
-    let registry = registry();
-    let graph = graph_from_document(&ast, ast.roots[0], &registry.read(), None).expect("builds");
+    let graph = graph(&app(), JUMP).expect("builds");
 
     assert_eq!(graph.nodes.len(), 2);
     let clip = node_id("clip");
@@ -87,8 +114,7 @@ AnimGraph {
 }
 Links([Link(Data("pose"), Input(FromFsmSource("pose")))])
 "#;
-    let ast = parse_bsn(doc).expect("parses");
-    let graph = graph_from_document(&ast, ast.roots[0], &registry().read(), None).expect("builds");
+    let graph = graph(&app(), doc).expect("builds");
     let inputs = graph.io_spec.sorted_inputs();
     assert_eq!(inputs.len(), 3, "{inputs:?}");
     assert_eq!(graph.default_data.len(), 1);
@@ -97,31 +123,31 @@ Links([Link(Data("pose"), Input(FromFsmSource("pose")))])
 #[test]
 fn a_node_without_a_node_component_is_refused() {
     let doc = "#g\nAnimGraph { }\nChildren [\n    #lost\n    NodePosition(1.0, 2.0)\n]\n";
-    let ast = parse_bsn(doc).expect("parses");
-    let err = graph_from_document(&ast, ast.roots[0], &registry().read(), None).unwrap_err();
+    let err = graph(&app(), doc).unwrap_err();
     assert!(err.contains("lost"), "{err}");
 }
 
 const LOCOMOTION: &str = r#"
 #locomotion
-AnimFsm { start: "grounded", inputs: [Data("speed", F32)], outputs: [Time, Data("pose", Pose)] }
+AnimFsm { start: #grounded, inputs: [Data("speed", F32)], outputs: [Time, Data("pose", Pose)] }
 Children [
     #grounded
     AnimState { }
     NodePosition(0.0, 0.0)
     --
     #jump
-    AnimState { enter: Some(TransitionData { kind: Graph { graph: "", timed: Some(0.08) }, reset_target_state: true }) }
+    AnimState { enter: Some(TransitionData { kind: Graph { graph: "t.animgraph.bsn", timed: Some(0.08) }, reset_target_state: true }) }
     NodePosition(330.0, -150.0)
     --
-    AnimTransition { from: "jump", to: "grounded" }
+    AnimTransition { from: #jump, to: #grounded }
 ]
 "#;
 
 #[test]
 fn a_bsn_state_machine_builds_its_states_and_transitions() {
-    let ast = parse_bsn(LOCOMOTION).expect("parses");
-    let fsm = fsm_from_document(&ast, ast.roots[0], &registry().read(), None).expect("builds");
+    let app = app();
+    let (world, root) = spawn(&app, LOCOMOTION).expect("spawns");
+    let fsm = fsm_from_world(&world, root).expect("builds");
 
     assert_eq!(fsm.states.len(), 2);
     assert_eq!(fsm.start_state, state_id("grounded"));
@@ -137,10 +163,7 @@ fn a_bsn_state_machine_builds_its_states_and_transitions() {
 
 #[test]
 fn a_start_state_that_is_not_a_state_is_refused() {
-    let doc = LOCOMOTION.replace(r#"start: "grounded""#, r#"start: "flying""#);
-    let ast = parse_bsn(&doc).expect("parses");
-    let err = fsm_from_document(&ast, ast.roots[0], &registry().read(), None).unwrap_err();
+    let doc = LOCOMOTION.replace("start: #grounded", "start: #flying");
+    let err = spawn(&app(), &doc).map(|_| ()).unwrap_err();
     assert!(err.contains("flying"), "{err}");
 }
-
-
