@@ -5,8 +5,8 @@ use bevy::{
 };
 
 use crate::{
-    animation_clip::GraphClip, animation_graph::AnimationGraph, skeleton::Skeleton,
-    state_machine::high_level::StateMachine,
+    animation_clip::GraphClip, animation_graph::AnimationGraph, bone_mask_asset::BoneMaskAsset,
+    skeleton::Skeleton, state_machine::high_level::StateMachine,
 };
 
 /// Contains temprary data such as references to assets, gizmos, etc.
@@ -16,6 +16,7 @@ pub struct SystemResources<'w, 's> {
     pub animation_graph_assets: Res<'w, Assets<AnimationGraph>>,
     pub state_machine_assets: Res<'w, Assets<StateMachine>>,
     pub skeleton_assets: Res<'w, Assets<Skeleton>>,
+    pub bone_mask_assets: Res<'w, Assets<BoneMaskAsset>>,
     // HACK: The mutable transform access is needed due to the query being reused by the apply_pose
     // function. This is due to bevy's restriction against conflicting system parameters
     pub transform_query: Query<'w, 's, (&'static mut Transform, &'static GlobalTransform)>,

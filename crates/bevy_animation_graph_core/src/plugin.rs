@@ -179,6 +179,9 @@ impl AnimationGraphCorePlugin {
         app.init_asset::<Skeleton>()
             .init_asset_loader::<SkeletonLoader>()
             .register_asset_reflect::<Skeleton>();
+        app.init_asset::<crate::bone_mask_asset::BoneMaskAsset>()
+            .init_asset_loader::<crate::bone_mask_asset::BoneMaskLoader>()
+            .register_asset_reflect::<crate::bone_mask_asset::BoneMaskAsset>();
         app.init_asset::<Ragdoll>()
             .init_asset_loader::<RagdollLoader>()
             .register_asset_reflect::<Ragdoll>();

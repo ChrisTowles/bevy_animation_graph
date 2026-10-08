@@ -31,6 +31,7 @@ pub mod blend_space_node;
 pub mod bool;
 pub mod chain_node;
 pub mod clip_node;
+pub mod bone_mask_node;
 pub mod const_entity_path;
 pub mod dummy_node;
 pub mod event_markup_node;
@@ -86,6 +87,7 @@ impl BuiltinNodesPlugin {
             // quat
             .register_type::<RotationArcNode>()
             .register_type::<const_entity_path::ConstEntityPath>()
+            .register_type::<bone_mask_node::BoneMaskNode>()
             .register_type::<vec3::vec2_from_f32::BuildVec2Node>()
             // event queue
             .register_type::<FireEventNode>()
