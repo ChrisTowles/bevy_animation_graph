@@ -14,7 +14,7 @@
             id: "f7c1cfe1-dd28-4ae9-b322-e1b85ae09a50",
             name: "",
             inner: {
-                "bevy_animation_graph::builtin_nodes::TwoBoneIKNode": (),
+                "bevy_animation_graph::builtin_nodes::TwoBoneIKNode": (explicit_chain: false, target_rotation: false, pole_target: false, weight: false),
             },
             should_debug: false,
         ),
