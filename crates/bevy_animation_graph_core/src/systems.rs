@@ -104,6 +104,24 @@ fn extract_delta(
     }
 }
 
+/// Whether `map` no longer stands for the hierarchy under `root`: empty, a mapped entity gone,
+/// or one (the root included) whose children or name changed since the system last ran.
+fn entity_map_stale(
+    map: &HashMap<BoneId, Entity>,
+    root: Entity,
+    resources: &SystemResources,
+) -> bool {
+    map.is_empty()
+        || std::iter::once(root)
+            .chain(map.values().copied())
+            .any(|entity| match resources.hierarchy_changes.get(entity) {
+                Ok((children, name)) => {
+                    name.is_changed() || children.is_some_and(|children| children.is_changed())
+                }
+                Err(_) => true,
+            })
+}
+
 fn build_entity_map(root_entity: Entity, resources: &SystemResources) -> HashMap<BoneId, Entity> {
     let mut entity_map = HashMap::default();
 
@@ -178,7 +196,9 @@ pub fn run_animation_player(
 
     // The entity map is updated regardless of animation type.
     // Important as the entity map is relied upon for e.g. debug bone drawing
-    {
+    // Rebuilt only when the hierarchy under the root changed: a full rebuild hashes every bone's
+    // whole path, each tick, for every player.
+    if entity_map_stale(&player.entity_map, root, system_resources) {
         let _entity_map_span = info_span!("build_entity_map").entered();
         player.entity_map = build_entity_map(root, system_resources);
     }

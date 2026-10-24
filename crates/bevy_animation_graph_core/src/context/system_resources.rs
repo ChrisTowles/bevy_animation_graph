@@ -22,6 +22,9 @@ pub struct SystemResources<'w, 's> {
     pub transform_query: Query<'w, 's, (&'static mut Transform, &'static GlobalTransform)>,
     pub names_query: Query<'w, 's, &'static Name>,
     pub children_query: Query<'w, 's, &'static Children>,
+    /// The same hierarchy with change ticks: a player's entity map is rebuilt only when a bone in
+    /// it gained or lost children or was renamed.
+    pub hierarchy_changes: Query<'w, 's, (Option<Ref<'static, Children>>, Ref<'static, Name>)>,
     pub parent_query: Query<'w, 's, &'static ChildOf>,
     #[cfg(feature = "physics_avian")]
     pub rigidbody_query: Query<'w, 's, &'static avian3d::prelude::RigidBody>,
