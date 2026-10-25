@@ -104,8 +104,11 @@ fn extract_delta(
     }
 }
 
-/// Whether `map` no longer stands for the hierarchy under `root`: empty, a mapped entity gone,
-/// or one (the root included) whose children or name changed since the system last ran.
+/// Whether `map` no longer stands for the hierarchy under `root`: empty, a mapped entity gone or
+/// unnamed, or one (the root included) whose name or children changed since the system last ran.
+/// A mapped bone's own parent link is checked too: when it leaves a parent as the last child, that
+/// parent's `Children` is removed rather than changed. And a mapped entity's children are checked
+/// for a new name: an unnamed child is skipped by the map, so naming it changes nothing mapped.
 fn entity_map_stale(
     map: &HashMap<BoneId, Entity>,
     root: Entity,
@@ -115,8 +118,18 @@ fn entity_map_stale(
         || std::iter::once(root)
             .chain(map.values().copied())
             .any(|entity| match resources.hierarchy_changes.get(entity) {
-                Ok((children, name)) => {
-                    name.is_changed() || children.is_some_and(|children| children.is_changed())
+                Ok((name, child_of, children)) => {
+                    name.is_changed()
+                        || (entity != root && child_of.is_none_or(|child_of| child_of.is_changed()))
+                        || children.is_some_and(|children| {
+                            children.is_changed()
+                                || children.iter().any(|child| {
+                                    resources
+                                        .hierarchy_changes
+                                        .get(child)
+                                        .is_ok_and(|(name, _, _)| name.is_changed())
+                                })
+                        })
                 }
                 Err(_) => true,
             })
