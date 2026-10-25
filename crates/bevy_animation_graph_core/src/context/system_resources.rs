@@ -22,13 +22,14 @@ pub struct SystemResources<'w, 's> {
     pub transform_query: Query<'w, 's, (&'static mut Transform, &'static GlobalTransform)>,
     pub names_query: Query<'w, 's, &'static Name>,
     pub children_query: Query<'w, 's, &'static Children>,
-    /// The same hierarchy with change ticks: a player's entity map is rebuilt only when a bone in
-    /// it gained or lost children, was renamed or reparented, or one of its children was named.
+    /// The same hierarchy with change ticks: a player's entity map is rebuilt only when an entity
+    /// its build walked gained or lost children, was renamed or reparented, or one of its children
+    /// was named. `Name` is optional so an unnamed root is not mistaken for a despawned one.
     pub hierarchy_changes: Query<
         'w,
         's,
         (
-            Ref<'static, Name>,
+            Option<Ref<'static, Name>>,
             Option<Ref<'static, ChildOf>>,
             Option<Ref<'static, Children>>,
         ),
