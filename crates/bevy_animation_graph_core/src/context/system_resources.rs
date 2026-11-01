@@ -23,6 +23,8 @@ pub struct SystemResources<'w, 's> {
     pub names_query: Query<'w, 's, &'static Name>,
     pub children_query: Query<'w, 's, &'static Children>,
     pub parent_query: Query<'w, 's, &'static ChildOf>,
+    /// What the player's entity map was built from, for telling when it must be built again.
+    pub tree_query: Query<'w, 's, crate::systems::TreeQuery>,
     #[cfg(feature = "physics_avian")]
     pub rigidbody_query: Query<'w, 's, &'static avian3d::prelude::RigidBody>,
 }

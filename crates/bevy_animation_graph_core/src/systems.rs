@@ -104,6 +104,29 @@ fn extract_delta(
     }
 }
 
+/// An entity's place in a bone tree: its name, children and parent, with their change ticks.
+pub type TreeQuery = (
+    Ref<'static, Name>,
+    Option<Ref<'static, Children>>,
+    Option<Ref<'static, ChildOf>>,
+);
+
+/// Whether the bone tree `map` was built from is as it was: no entity in it gone, renamed,
+/// reparented or given other children since the system reading `tree` last ran. Rebuilding the
+/// map walks the tree and hashes every bone's whole path; at 49 players a fixed step it cost
+/// 0.8 ms a frame, with the tree unchanged.
+pub fn entity_map_current(map: &HashMap<BoneId, Entity>, tree: &Query<TreeQuery>) -> bool {
+    !map.is_empty()
+        && map.values().all(|&entity| match tree.get(entity) {
+            Ok((name, children, parent)) => {
+                !name.is_changed()
+                    && !children.is_some_and(|c| c.is_changed())
+                    && !parent.is_some_and(|p| p.is_changed())
+            }
+            Err(_) => false,
+        })
+}
+
 fn build_entity_map(root_entity: Entity, resources: &SystemResources) -> HashMap<BoneId, Entity> {
     let mut entity_map = HashMap::default();
 
@@ -178,7 +201,7 @@ pub fn run_animation_player(
 
     // The entity map is updated regardless of animation type.
     // Important as the entity map is relied upon for e.g. debug bone drawing
-    {
+    if !entity_map_current(&player.entity_map, &system_resources.tree_query) {
         let _entity_map_span = info_span!("build_entity_map").entered();
         player.entity_map = build_entity_map(root, system_resources);
     }
@@ -255,5 +278,59 @@ fn apply_morph_weights(weights: &mut [f32], new_weights: &[f32]) {
     let zipped = weights.iter_mut().zip(new_weights);
     for (morph_weight, keyframe) in zipped {
         *morph_weight = *keyframe;
+    }
+}
+
+#[cfg(test)]
+mod entity_map_tests {
+    use bevy::ecs::system::SystemState;
+
+    use super::*;
+
+    #[test]
+    fn the_entity_map_is_current_until_its_tree_changes() {
+        let mut world = World::new();
+        let root = world.spawn(Name::new("root")).id();
+        let bone = world.spawn((Name::new("bone"), ChildOf(root))).id();
+        let mut state: SystemState<Query<TreeQuery>> = SystemState::new(&mut world);
+        let map: HashMap<BoneId, Entity> = [
+            (
+                EntityPath {
+                    parts: vec![Name::new("root")],
+                }
+                .id(),
+                root,
+            ),
+            (
+                EntityPath {
+                    parts: vec![Name::new("root"), Name::new("bone")],
+                }
+                .id(),
+                bone,
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let mut current = |world: &mut World| {
+            let tree = state.get(world).unwrap();
+            let current = entity_map_current(&map, &tree);
+            state.apply(world);
+            current
+        };
+        // Everything is new on the first look.
+        assert!(!current(&mut world));
+        assert!(current(&mut world), "an untouched tree keeps its map");
+        world.spawn((Name::new("tip"), ChildOf(bone)));
+        assert!(!current(&mut world), "a new child changes the tree");
+        assert!(current(&mut world));
+        world.entity_mut(bone).insert(Name::new("renamed"));
+        assert!(!current(&mut world), "a renamed bone changes it");
+        assert!(current(&mut world));
+        world.despawn(bone);
+        assert!(!current(&mut world), "a despawned bone changes it");
+        assert!(
+            !entity_map_current(&HashMap::default(), &state.get(&world).unwrap()),
+            "an empty map is never current"
+        );
     }
 }
