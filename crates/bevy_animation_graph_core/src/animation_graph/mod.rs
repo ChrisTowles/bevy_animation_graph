@@ -874,11 +874,7 @@ impl AnimationGraph {
         ctx.node_caches_mut().mark_update_started(node.id, key);
 
         {
-            let _node_update_span = info_span!(
-                "anim_node_update",
-                name = format!("{}", node.id.uuid().hyphenated())
-            )
-            .entered();
+            let _node_update_span = info_span!("anim_node_update", name = %node.name).entered();
             node.update(
                 ctx.create_node_context(node.id, self)
                     .with_debugging(node.should_debug),
