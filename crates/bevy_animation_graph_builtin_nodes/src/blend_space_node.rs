@@ -4,7 +4,7 @@ use bevy_animation_graph_core::{
     animation_graph::TimeUpdate,
     animation_node::{EditProxy, NodeLike, ReflectEditProxy, ReflectNodeLike},
     context::{new_context::NodeContext, spec_context::SpecContext},
-    edge_data::DataSpec,
+    edge_data::{DataSpec, events::EventQueue},
     errors::GraphError,
     utils::delaunay::Triangulation,
 };
@@ -48,6 +48,8 @@ impl BlendSpaceNode {
     /// 2D position in the blend space to sample
     pub const POSITION: &'static str = "position";
     pub const OUT_POSE: &'static str = "pose";
+    /// The events of the three blended inputs (`events <id>`), each scaled by its weight.
+    pub const OUT_EVENTS: &'static str = "events";
 
     pub fn new(mode: BlendMode, sync_mode: BlendSyncMode, points: Vec<PointElement>) -> Self {
         Self {
@@ -210,6 +212,18 @@ impl NodeLike for BlendSpaceNode {
         ctx.set_time(pose_0.timestamp);
         ctx.set_data_fwd(Self::OUT_POSE, out_pose);
 
+        // Each blended input's events, scaled by the weight its pose got, so a consumer keeps the
+        // dominant clip's notifies (a footstep) and drops the faded ones'. Only the triangle's
+        // three are asked: the others had no time update this frame.
+        let mut events = [(None, f0), (None, f1), (None, f2)];
+        for ((queue, _), v) in events.iter_mut().zip([v0, v1, v2]) {
+            *queue = ctx
+                .data_back(Self::events_pin_id(self.vertex_key(v.id.index())))
+                .ok()
+                .and_then(|value| value.into_event_queue().ok());
+        }
+        ctx.set_data_fwd(Self::OUT_EVENTS, weighted_events(events));
+
         Ok(())
     }
 
@@ -218,13 +232,12 @@ impl NodeLike for BlendSpaceNode {
 
         for p in &self.points {
             ctx.add_input_data(Self::pose_pin_id(&p.id), DataSpec::Pose);
-            if matches!(&self.sync_mode, BlendSyncMode::EventTrack(_)) {
-                ctx.add_input_data(Self::events_pin_id(&p.id), DataSpec::EventQueue);
-            }
+            ctx.add_input_data(Self::events_pin_id(&p.id), DataSpec::EventQueue);
             ctx.add_input_time(Self::time_pin_id(&p.id));
         }
 
         ctx.add_output_data(Self::OUT_POSE, DataSpec::Pose)
+            .add_output_data(Self::OUT_EVENTS, DataSpec::EventQueue)
             .add_output_time();
 
         Ok(())
@@ -265,9 +278,53 @@ impl EditProxy for BlendSpaceNode {
     }
 }
 
+/// The queues (an unlinked input is none) concatenated, each event's weight scaled by its input's.
+fn weighted_events(queues: [(Option<EventQueue>, f32); 3]) -> EventQueue {
+    queues
+        .into_iter()
+        .map(|(queue, weight)| {
+            let mut queue = queue.unwrap_or_default();
+            for event in &mut queue.events {
+                event.weight *= weight;
+            }
+            queue
+        })
+        .fold(EventQueue::default(), EventQueue::concat)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy_animation_graph_core::edge_data::events::{AnimationEvent, SampledEvent};
+
+    #[test]
+    fn the_blended_inputs_events_come_out_scaled_by_their_weights() {
+        let step = |name: &str| EventQueue {
+            events: vec![SampledEvent {
+                event: AnimationEvent::StringId(name.into()),
+                weight: 1.0,
+                percentage: 0.5,
+                track: Some("footstep".into()),
+            }],
+        };
+        let out = weighted_events([
+            (Some(step("footstep_l")), 0.75),
+            (None, 0.2),
+            (Some(step("footstep_r")), 0.05),
+        ]);
+        let got: Vec<(String, f32)> = out
+            .events
+            .iter()
+            .map(|e| match &e.event {
+                AnimationEvent::StringId(s) => (s.clone(), e.weight),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![("footstep_l".into(), 0.75), ("footstep_r".into(), 0.05)]
+        );
+    }
 
     #[test]
     fn a_node_with_only_points_triangulates_them() {
